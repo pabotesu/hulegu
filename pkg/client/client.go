@@ -723,10 +723,16 @@ func (c *Client) setupEndpointForPeer(peerKey wgtypes.Key) error {
 	localAddr := endpoint.LocalAddr().(*net.UDPAddr)
 	log.Printf("Hulegu endpoint for peer %s listening on %s", peerKey, localAddr.String())
 
-	// ここで対象ピアのエンドポイントを更新する処理を追加
-	// 実際の環境では、WireGuardのピア設定を変更するコマンドを実行する必要がある
-	// 例: wg set wg0 peer <peer-public-key> endpoint <local-addr>
+	// ここで対象ピアのエンドポイントを更新
+	err = c.wg.UpdatePeerEndpoint(peerKey, localAddr)
+	if err != nil {
+		// エンドポイントをクローズして戻す
+		endpoint.Close()
+		delete(c.endpoints, peerKey)
+		return fmt.Errorf("failed to update WireGuard peer endpoint: %w", err)
+	}
 
+	log.Printf("Updated WireGuard peer %s endpoint to %s", peerKey, localAddr.String())
 	return nil
 }
 
