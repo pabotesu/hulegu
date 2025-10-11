@@ -872,28 +872,36 @@ func (c *Client) processPackets() {
 
 // 転送処理の実装
 func (c *Client) forwardPacketToWireGuard(packetData []byte) {
-	c.wgConnMu.Lock()
-	defer c.wgConnMu.Unlock()
-
-	if c.wgConn == nil {
-		// コネクションがない場合は初期化を試みる
-		c.wgConnMu.Unlock()
-		err := c.initWireGuardConnection()
-		c.wgConnMu.Lock()
-		if err != nil {
-			log.Printf("Failed to initialize WireGuard connection: %v", err)
-			return
-		}
+	// WireGuardのリッスンポートを取得
+	port := c.wg.GetListenPort()
+	if port == 0 {
+		log.Printf("ERROR: WireGuard not listening on any port")
+		return
 	}
 
-	// 既存のコネクションを使ってパケットを転送
-	n, err := c.wgConn.Write(packetData)
+	// WireGuardのリッスンアドレス
+	wgAddr := fmt.Sprintf("127.0.0.1:%d", port)
+
+	// UDPアドレスの解決
+	addr, err := net.ResolveUDPAddr("udp", wgAddr)
 	if err != nil {
-		log.Printf("Failed to forward packet to WireGuard: %v", err)
-		// エラー時はコネクションをリセット
-		c.wgConn.Close()
-		c.wgConn = nil
+		log.Printf("ERROR: Failed to resolve WireGuard address: %v", err)
+		return
+	}
+
+	// UDPコネクション作成
+	conn, err := net.DialUDP("udp", nil, addr)
+	if err != nil {
+		log.Printf("ERROR: Failed to connect to WireGuard: %v", err)
+		return
+	}
+	defer conn.Close()
+
+	// パケットを転送
+	n, err := conn.Write(packetData)
+	if err != nil {
+		log.Printf("ERROR: Failed to forward packet to WireGuard: %v", err)
 	} else {
-		log.Printf("Successfully forwarded %d bytes to WireGuard", n)
+		log.Printf("Successfully forwarded %d bytes to WireGuard at %s", n, wgAddr)
 	}
 }
