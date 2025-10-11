@@ -275,11 +275,11 @@ func (c *Client) handleWebSocketMessage(data []byte) {
 			return
 		}
 
-		log.Printf("Received packet from server: targetKey=%s, packetID=%d, size=%d bytes",
-			packet.TargetKey.String(), packet.PacketID, len(packet.PacketData))
+		log.Printf("Received packet from server: targetKey=%s, sourceKey=%s, packetID=%d, size=%d bytes",
+			packet.TargetKey.String(), packet.SourceKey.String(), packet.PacketID, len(packet.PacketData))
 
-		// 送信元ピア情報を使用してパケットを適切なエンドポイントに転送
-		c.handleWebSocketPacket(packet.PacketData, packet.TargetKey)
+		// 送信元の公開鍵を使ってパケットをルーティング
+		c.handleWebSocketPacket(packet.PacketData, packet.SourceKey)
 	}
 }
 
@@ -579,7 +579,8 @@ func (c *Client) forwardPacketToServer(packetData []byte, peerKey wgtypes.Key) e
 
 	// パケットデータの作成（宛先ピア情報を含む）
 	packet := &protocol.PacketData{
-		TargetKey:  peerKey,
+		TargetKey:  peerKey,     // 宛先ピアの公開鍵
+		SourceKey:  c.publicKey, // 送信元（自分自身）の公開鍵 - 新規追加
 		PacketID:   c.packetID,
 		PacketData: packetData,
 	}

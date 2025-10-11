@@ -39,7 +39,8 @@ type PongData struct {
 
 // PacketData はWireGuardパケットを含みます
 type PacketData struct {
-	TargetKey  wgtypes.Key // 宛先ピアの公開鍵（サーバーが使用）
+	TargetKey  wgtypes.Key // 宛先ピアの公開鍵
+	SourceKey  wgtypes.Key // 送信元ピアの公開鍵
 	PacketID   uint32      // パケット識別子（重複検出用）
 	PacketData []byte      // 実際のWireGuardパケットデータ
 }

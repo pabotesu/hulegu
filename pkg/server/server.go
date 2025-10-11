@@ -647,15 +647,17 @@ func (s *Server) handlePacket(connection *Connection, payload []byte) error {
 
 	log.Printf("[DEBUG] Found target connection for key %s", packet.TargetKey.String())
 
-	// パケットの送信元情報を変更 (重要!)
+	// パケットの送信元情報を維持し、SourceKeyに設定
 	modifiedPacket := &protocol.PacketData{
-		TargetKey:  connection.PublicKey, // 送信元接続の公開鍵に変更
+		TargetKey:  packet.TargetKey,     // 元の宛先キーを維持
+		SourceKey:  connection.PublicKey, // 送信元の公開鍵を明示的に設定
 		PacketID:   packet.PacketID,      // 元のパケットIDを維持
 		PacketData: packet.PacketData,    // パケットデータは変更なし
 	}
 
-	log.Printf("[DEBUG] Modified packet: originalTargetKey=%s → newTargetKey=%s",
-		packet.TargetKey.String(), connection.PublicKey.String())
+	// 修正: より明確なログ出力に変更
+	log.Printf("[DEBUG] Forwarding packet: target=%s, source=%s, packetID=%d, size=%d bytes",
+		packet.TargetKey.String(), connection.PublicKey.String(), packet.PacketID, len(packet.PacketData))
 
 	// 変更したパケットをエンコード
 	packetPayload, err := protocol.EncodePacket(modifiedPacket)

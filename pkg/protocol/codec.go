@@ -314,6 +314,12 @@ func EncodePacket(data *PacketData) ([]byte, error) {
 		return nil, err
 	}
 
+	// 送信元キーの書き込み（新規追加）
+	_, err = buffer.Write(data.SourceKey[:])
+	if err != nil {
+		return nil, err
+	}
+
 	// パケットIDの書き込み
 	err = binary.Write(buffer, binary.BigEndian, data.PacketID)
 	if err != nil {
@@ -338,7 +344,7 @@ func EncodePacket(data *PacketData) ([]byte, error) {
 
 // DecodePacket はWireGuardパケットデータをデコードします
 func DecodePacket(payload []byte) (*PacketData, error) {
-	if len(payload) < 32+4+2 { // キー(32) + ID(4) + データ長(2)
+	if len(payload) < 32+32+4+2 { // 宛先キー(32) + 送信元キー(32) + ID(4) + データ長(2)
 		return nil, fmt.Errorf("invalid packet payload size: %d", len(payload))
 	}
 
@@ -347,7 +353,12 @@ func DecodePacket(payload []byte) (*PacketData, error) {
 	// 宛先キーの読み取り
 	var targetKey wgtypes.Key
 	copy(targetKey[:], payload[:32])
-	reader.Seek(32, 0)
+
+	// 送信元キーの読み取り（新規追加）
+	var sourceKey wgtypes.Key
+	copy(sourceKey[:], payload[32:64])
+
+	reader.Seek(64, 0) // 両方のキーをスキップ
 
 	// パケットIDの読み取り
 	var packetID uint32
@@ -364,7 +375,7 @@ func DecodePacket(payload []byte) (*PacketData, error) {
 	}
 
 	// パケットデータの読み取り
-	offset := 32 + 4 + 2
+	offset := 32 + 32 + 4 + 2 // 宛先キー + 送信元キー + ID + データ長
 	if len(payload) < offset+int(packetLen) {
 		return nil, fmt.Errorf("packet data truncated")
 	}
@@ -374,6 +385,7 @@ func DecodePacket(payload []byte) (*PacketData, error) {
 
 	return &PacketData{
 		TargetKey:  targetKey,
+		SourceKey:  sourceKey, // 新規追加
 		PacketID:   packetID,
 		PacketData: packetData,
 	}, nil

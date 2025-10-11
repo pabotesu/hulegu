@@ -4,7 +4,7 @@ import "time"
 
 const (
 	// ProtocolVersion は現在のプロトコルバージョンを定義します
-	ProtocolVersion uint16 = 1
+	ProtocolVersion uint16 = 2 // バージョンを1から2に更新（SourceKeyフィールド追加のため）
 
 	// MaxMessageSize はメッセージの最大サイズを定義します
 	MaxMessageSize = 65535
