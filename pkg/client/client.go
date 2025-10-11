@@ -285,16 +285,21 @@ func (c *Client) handleWebSocketMessage(data []byte) {
 
 // handleWebSocketPacket はWebSocketから受信したパケットをWireGuardに転送します
 func (c *Client) handleWebSocketPacket(packetData []byte, sourceKey wgtypes.Key) {
-	// 各エンドポイントの状態をログ出力
-	c.peerMu.RLock()
-	log.Printf("Looking for endpoint with key %s among %d endpoints",
-		sourceKey.String(), len(c.endpoints))
-
-	// デバッグ用：すべてのエンドポイントキーを出力
-	for key := range c.endpoints {
-		log.Printf("  Available endpoint: %s", key.String())
+	// WireGuardパケットの簡易解析を行い、IPヘッダーから情報抽出
+	if len(packetData) >= 20 { // 最小IPヘッダーサイズ
+		version := packetData[0] >> 4
+		if version == 4 { // IPv4
+			dstIP := net.IP(packetData[16:20]).String()
+			log.Printf("Received IPv4 packet for destination IP: %s", dstIP)
+		}
 	}
 
+	// 既存のエンドポイント検索ロジック
+	c.peerMu.RLock()
+	log.Printf("Available endpoints: %d", len(c.endpoints))
+	for key := range c.endpoints {
+		log.Printf("  Endpoint key: %s", key.String())
+	}
 	endpoint, exists := c.endpoints[sourceKey]
 	c.peerMu.RUnlock()
 
@@ -772,4 +777,18 @@ func (c *Client) setupEndpointForPeer(peerKey wgtypes.Key) error {
 func (c *Client) StartPacketForwarding() {
 	// すでに実行中のパケット転送ループがある場合は重複して起動しないよう制御が必要
 	go c.packetForwardingLoop()
+}
+
+// 対象ピアが有効化されているか確認する関数を追加
+func (c *Client) IsPeerEnabled(peerKeyStr string) bool {
+	peerKey, err := wgtypes.ParseKey(peerKeyStr)
+	if err != nil {
+		return false
+	}
+
+	c.peerMu.RLock()
+	defer c.peerMu.RUnlock()
+
+	enabled, exists := c.enabledPeers[peerKey]
+	return exists && enabled
 }
