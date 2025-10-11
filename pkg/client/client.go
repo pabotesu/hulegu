@@ -285,49 +285,37 @@ func (c *Client) handleWebSocketMessage(data []byte) {
 
 // handleWebSocketPacket はWebSocketから受信したパケットをWireGuardに転送します
 func (c *Client) handleWebSocketPacket(packetData []byte, sourceKey wgtypes.Key) {
-	// WireGuardパケットの簡易解析を行い、IPヘッダーから情報抽出
+	// WireGuardパケットの簡易解析（デバッグ用）
+	var srcIP, dstIP string
 	if len(packetData) >= 20 { // 最小IPヘッダーサイズ
 		version := packetData[0] >> 4
 		if version == 4 { // IPv4
-			dstIP := net.IP(packetData[16:20]).String()
-			log.Printf("Received IPv4 packet for destination IP: %s", dstIP)
+			srcIP = net.IP(packetData[12:16]).String()
+			dstIP = net.IP(packetData[16:20]).String()
+			log.Printf("Received IPv4 packet: src=%s, dst=%s from peer %s",
+				srcIP, dstIP, sourceKey.String())
 		}
 	}
 
-	// 既存のエンドポイント検索ロジック
+	// エンドポイント検索
 	c.peerMu.RLock()
-	log.Printf("Available endpoints: %d", len(c.endpoints))
-	for key := range c.endpoints {
-		log.Printf("  Endpoint key: %s", key.String())
-	}
 	endpoint, exists := c.endpoints[sourceKey]
 	c.peerMu.RUnlock()
 
+	// エンドポイントが見つからない場合は処理を終了
 	if !exists || endpoint == nil {
-		log.Printf("ERROR: No endpoint found for peer %s", sourceKey)
+		log.Printf("No endpoint found for peer %s. If communication is expected, "+
+			"use EnablePeer(%s) to establish the connection.",
+			sourceKey, sourceKey.String())
 
-		// 重要: すべてのエンドポイントでパケットを試してみる
-		log.Printf("Attempting to send packet to all endpoints as fallback")
-		c.peerMu.RLock()
-		for key, ep := range c.endpoints {
-			if ep != nil {
-				log.Printf("Trying to write packet to endpoint %s", key.String())
-				_, err := ep.WriteToWireGuard(packetData)
-				if err != nil {
-					log.Printf("Failed to write to endpoint %s: %v", key.String(), err)
-				} else {
-					log.Printf("Successfully wrote packet to endpoint %s", key.String())
-				}
-			}
-		}
-		c.peerMu.RUnlock()
+		// フォールバックを完全に削除！
 		return
 	}
 
-	// パケットをWireGuardに転送
+	// 適切なエンドポイントが見つかった場合のみ転送
 	n, err := endpoint.WriteToWireGuard(packetData)
 	if err != nil {
-		log.Printf("Failed to forward packet to WireGuard for peer %s: %v", sourceKey, err)
+		log.Printf("Failed to forward packet to WireGuard: %v", err)
 	} else {
 		log.Printf("Successfully forwarded %d bytes to WireGuard for peer %s", n, sourceKey.String())
 	}
