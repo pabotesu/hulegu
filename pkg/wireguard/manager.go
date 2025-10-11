@@ -73,12 +73,21 @@ func (w *Manager) GetPublicKey() wgtypes.Key {
 	return w.device.PublicKey
 }
 
-// GetListenPort はデバイスのリスニングポートを返す
-func (w *Manager) GetListenPort() int {
-	if w.device == nil {
+// GetListenPort はWireGuardインターフェースのリスニングポートを取得します
+func (m *Manager) GetListenPort() int {
+	// 最新のデバイス情報を取得
+	err := m.RefreshDeviceInfo()
+	if err != nil {
+		log.Printf("Failed to refresh device info: %v", err)
 		return 0
 	}
-	return w.device.ListenPort
+
+	// デバイスがリスニングしているポートを返す
+	if m.device != nil {
+		return m.device.ListenPort
+	}
+
+	return 0
 }
 
 // GetPeers は登録済みのピア一覧を返す

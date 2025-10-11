@@ -73,6 +73,19 @@ type Client struct {
 	peerMu    sync.RWMutex // ピア管理用のミューテックス
 
 	reconnectMu sync.Mutex // 再接続処理の排他制御
+
+	// Client構造体にUDPソケットフィールドを追加
+	wgConn   net.Conn   // WireGuardへの転送用UDPソケット
+	wgConnMu sync.Mutex // WireGuardコネクション用ミューテックス
+
+	// 転送用パケットのチャネル
+	packetQueue chan wireguardPacket
+}
+
+// wireguardPacket は転送用パケットを表します
+type wireguardPacket struct {
+	data      []byte
+	sourceKey wgtypes.Key
 }
 
 // New は新しいHuleguクライアントを作成します
@@ -98,7 +111,11 @@ func New(config *Config) (*Client, error) {
 		enabledPeers: make(map[wgtypes.Key]bool),
 		ctx:          ctx,
 		cancelFunc:   cancel,
+		packetQueue:  make(chan wireguardPacket, 100), // バッファ付きチャネル
 	}
+
+	// パケット処理ワーカーを起動
+	go client.processPackets()
 
 	return client, nil
 }
@@ -129,6 +146,12 @@ func (c *Client) Connect() error {
 	}
 
 	c.connected = true
+
+	// ハンドシェイク後にWireGuardソケットを初期化
+	err = c.initWireGuardConnection()
+	if err != nil {
+		log.Printf("Warning: Failed to initialize WireGuard connection: %v", err)
+	}
 
 	// WebSocketの読み込みループを開始
 	go c.websocketReadLoop()
@@ -297,27 +320,13 @@ func (c *Client) handleWebSocketPacket(packetData []byte, sourceKey wgtypes.Key)
 		}
 	}
 
-	// エンドポイント検索
-	c.peerMu.RLock()
-	endpoint, exists := c.endpoints[sourceKey]
-	c.peerMu.RUnlock()
-
-	// エンドポイントが見つからない場合は処理を終了
-	if !exists || endpoint == nil {
-		log.Printf("No endpoint found for peer %s. If communication is expected, "+
-			"use EnablePeer(%s) to establish the connection.",
-			sourceKey, sourceKey.String())
-
-		// フォールバックを完全に削除！
-		return
-	}
-
-	// 適切なエンドポイントが見つかった場合のみ転送
-	n, err := endpoint.WriteToWireGuard(packetData)
-	if err != nil {
-		log.Printf("Failed to forward packet to WireGuard: %v", err)
-	} else {
-		log.Printf("Successfully forwarded %d bytes to WireGuard for peer %s", n, sourceKey.String())
+	// 非ブロッキングでキューに投入
+	select {
+	case c.packetQueue <- wireguardPacket{data: packetData, sourceKey: sourceKey}:
+		// キューに入れることができた
+	default:
+		// キューがいっぱいの場合
+		log.Printf("WARNING: Packet queue full, dropping packet from %s", sourceKey)
 	}
 }
 
@@ -490,6 +499,14 @@ func (c *Client) Close() error {
 	if c.wg != nil {
 		c.wg.Close()
 	}
+
+	// WireGuardコネクションのクローズ
+	c.wgConnMu.Lock()
+	if c.wgConn != nil {
+		c.wgConn.Close()
+		c.wgConn = nil
+	}
+	c.wgConnMu.Unlock()
 
 	return nil
 }
@@ -769,15 +786,119 @@ func (c *Client) StartPacketForwarding() {
 }
 
 // 対象ピアが有効化されているか確認する関数を追加
-func (c *Client) IsPeerEnabled(peerKeyStr string) bool {
+func (c *Client) IsPeerEnabled(peerKeyStr string) (bool, error) {
 	peerKey, err := wgtypes.ParseKey(peerKeyStr)
 	if err != nil {
-		return false
+		return false, fmt.Errorf("invalid peer key: %w", err)
 	}
 
 	c.peerMu.RLock()
 	defer c.peerMu.RUnlock()
 
+	// ピアが有効化されているか確認
 	enabled, exists := c.enabledPeers[peerKey]
-	return exists && enabled
+	return exists && enabled, nil
+}
+
+// WireGuardソケット初期化関数
+func (c *Client) initWireGuardConnection() error {
+	port := c.wg.GetListenPort()
+	if port == 0 {
+		return fmt.Errorf("WireGuard not listening on any port")
+	}
+
+	wgAddr := fmt.Sprintf("127.0.0.1:%d", port)
+
+	c.wgConnMu.Lock()
+	defer c.wgConnMu.Unlock()
+
+	// 既存のコネクションがあればクローズ
+	if c.wgConn != nil {
+		c.wgConn.Close()
+	}
+
+	// 新しいUDPソケットを作成
+	conn, err := net.Dial("udp", wgAddr)
+	if err != nil {
+		return fmt.Errorf("failed to connect to WireGuard: %w", err)
+	}
+
+	c.wgConn = conn
+	log.Printf("Initialized WireGuard connection to %s", wgAddr)
+	return nil
+}
+
+// 定期的なWireGuardポート確認用関数
+func (c *Client) monitorWireGuardPort() {
+	ticker := time.NewTicker(1 * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-c.ctx.Done():
+			return
+		case <-ticker.C:
+			currentPort := c.wg.GetListenPort()
+
+			c.wgConnMu.Lock()
+			needsUpdate := c.wgConn == nil
+
+			// 現在のコネクションのポート番号を確認
+			if c.wgConn != nil {
+				addr := c.wgConn.RemoteAddr().(*net.UDPAddr)
+				if addr.Port != currentPort {
+					log.Printf("WireGuard port changed from %d to %d, updating connection",
+						addr.Port, currentPort)
+					needsUpdate = true
+				}
+			}
+			c.wgConnMu.Unlock()
+
+			// 必要に応じてコネクションを更新
+			if needsUpdate {
+				c.initWireGuardConnection()
+			}
+		}
+	}
+}
+
+// パケット処理ワーカー
+func (c *Client) processPackets() {
+	for {
+		select {
+		case <-c.ctx.Done():
+			return
+		case packet := <-c.packetQueue:
+			// 実際のWireGuard転送処理
+			c.forwardPacketToWireGuard(packet.data)
+		}
+	}
+}
+
+// 転送処理の実装
+func (c *Client) forwardPacketToWireGuard(packetData []byte) {
+	c.wgConnMu.Lock()
+	defer c.wgConnMu.Unlock()
+
+	if c.wgConn == nil {
+		// コネクションがない場合は初期化を試みる
+		c.wgConnMu.Unlock()
+		err := c.initWireGuardConnection()
+		c.wgConnMu.Lock()
+		if err != nil {
+			log.Printf("Failed to initialize WireGuard connection: %v", err)
+			return
+		}
+	}
+
+	// 既存のコネクションを使ってパケットを転送
+	n, err := c.wgConn.Write(packetData)
+	if err != nil {
+		log.Printf("Failed to forward packet to WireGuard: %v", err)
+		// エラー時はコネクションをリセット
+		c.wgConn.Close()
+		c.wgConn = nil
+	} else {
+		log.Printf("Successfully forwarded %d bytes to WireGuard", n)
+	}
 }
