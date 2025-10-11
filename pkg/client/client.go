@@ -315,13 +315,34 @@ func (c *Client) handleWebSocketPacket(packetData []byte, sourceKey wgtypes.Key)
 		}
 	}
 
-	// WebSocketからのパケットを直接WireGuardに転送
-	// パケットキューを使用
-	select {
-	case c.packetQueue <- wireguardPacket{data: packetData, sourceKey: sourceKey}:
-		log.Printf("Queued packet from peer %s for forwarding to WireGuard", sourceKey.String())
-	default:
-		log.Printf("WARNING: Packet queue full, dropping packet from %s", sourceKey)
+	// 送信元ピア用のエンドポイントを取得
+	c.peerMu.RLock()
+	endpoint, exists := c.endpoints[sourceKey]
+	c.peerMu.RUnlock()
+
+	if exists && endpoint != nil {
+		// エンドポイント経由でWireGuardに転送
+		n, err := endpoint.WriteToWireGuard(packetData)
+		if err != nil {
+			log.Printf("ERROR: Failed to forward packet via endpoint: %v", err)
+			// フォールバック: キューに入れて直接転送
+			select {
+			case c.packetQueue <- wireguardPacket{data: packetData, sourceKey: sourceKey}:
+				log.Printf("Falling back to direct forwarding for packet from peer %s", sourceKey.String())
+			default:
+				log.Printf("WARNING: Packet queue full, dropping packet from %s", sourceKey)
+			}
+		} else {
+			log.Printf("Successfully forwarded %d bytes via endpoint for peer %s", n, sourceKey.String())
+		}
+	} else {
+		// エンドポイントが見つからない場合はキューに入れて直接転送
+		select {
+		case c.packetQueue <- wireguardPacket{data: packetData, sourceKey: sourceKey}:
+			log.Printf("No endpoint found for peer %s, using direct forwarding", sourceKey.String())
+		default:
+			log.Printf("WARNING: Packet queue full, dropping packet from %s", sourceKey)
+		}
 	}
 }
 
