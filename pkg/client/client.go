@@ -275,28 +275,56 @@ func (c *Client) handleWebSocketMessage(data []byte) {
 			return
 		}
 
+		log.Printf("Received packet from server: targetKey=%s, packetID=%d, size=%d bytes",
+			packet.TargetKey.String(), packet.PacketID, len(packet.PacketData))
+
 		// 送信元ピア情報を使用してパケットを適切なエンドポイントに転送
 		c.handleWebSocketPacket(packet.PacketData, packet.TargetKey)
-
-		// 他のメッセージタイプは既存のままでOK
 	}
 }
 
 // handleWebSocketPacket はWebSocketから受信したパケットをWireGuardに転送します
 func (c *Client) handleWebSocketPacket(packetData []byte, sourceKey wgtypes.Key) {
+	// 各エンドポイントの状態をログ出力
 	c.peerMu.RLock()
+	log.Printf("Looking for endpoint with key %s among %d endpoints",
+		sourceKey.String(), len(c.endpoints))
+
+	// デバッグ用：すべてのエンドポイントキーを出力
+	for key := range c.endpoints {
+		log.Printf("  Available endpoint: %s", key.String())
+	}
+
 	endpoint, exists := c.endpoints[sourceKey]
 	c.peerMu.RUnlock()
 
 	if !exists || endpoint == nil {
-		log.Printf("No endpoint found for peer %s", sourceKey)
+		log.Printf("ERROR: No endpoint found for peer %s", sourceKey)
+
+		// 重要: すべてのエンドポイントでパケットを試してみる
+		log.Printf("Attempting to send packet to all endpoints as fallback")
+		c.peerMu.RLock()
+		for key, ep := range c.endpoints {
+			if ep != nil {
+				log.Printf("Trying to write packet to endpoint %s", key.String())
+				_, err := ep.WriteToWireGuard(packetData)
+				if err != nil {
+					log.Printf("Failed to write to endpoint %s: %v", key.String(), err)
+				} else {
+					log.Printf("Successfully wrote packet to endpoint %s", key.String())
+				}
+			}
+		}
+		c.peerMu.RUnlock()
 		return
 	}
 
 	// パケットをWireGuardに転送
-	_, err := endpoint.WriteToWireGuard(packetData)
+	n, err := endpoint.WriteToWireGuard(packetData)
 	if err != nil {
 		log.Printf("Failed to forward packet to WireGuard for peer %s: %v", sourceKey, err)
+	} else {
+		log.Printf("Successfully forwarded %d bytes to WireGuard for peer %s", n, sourceKey.String())
 	}
 }
 
@@ -539,6 +567,10 @@ func (c *Client) forwardPacketToServer(packetData []byte, peerKey wgtypes.Key) e
 
 	// パケットIDの生成
 	c.packetID++
+
+	// 送信先ログの追加
+	log.Printf("Forwarding packet to server for peer %s, packetID=%d, size=%d bytes",
+		peerKey.String(), c.packetID, len(packetData))
 
 	// パケットデータの作成（宛先ピア情報を含む）
 	packet := &protocol.PacketData{

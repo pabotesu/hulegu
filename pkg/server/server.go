@@ -632,15 +632,20 @@ func (s *Server) handlePacket(connection *Connection, payload []byte) error {
 		return fmt.Errorf("failed to decode packet: %w", err)
 	}
 
+	log.Printf("[DEBUG] Received packet from client %s, targetKey=%s",
+		connection.PublicKey.String(), packet.TargetKey.String())
+
 	// 宛先接続の検索
 	s.connectionsMu.RLock()
 	targetConnection, exists := s.connectionsByPeerKey[packet.TargetKey]
 	s.connectionsMu.RUnlock()
 
 	if !exists || targetConnection == nil {
-		// 宛先接続が見つからない場合
+		log.Printf("[ERROR] No connection found for target key: %s", packet.TargetKey)
 		return fmt.Errorf("no connection found for target key: %s", packet.TargetKey)
 	}
+
+	log.Printf("[DEBUG] Found target connection for key %s", packet.TargetKey.String())
 
 	// パケットの送信元情報を変更 (重要!)
 	modifiedPacket := &protocol.PacketData{
@@ -648,6 +653,9 @@ func (s *Server) handlePacket(connection *Connection, payload []byte) error {
 		PacketID:   packet.PacketID,      // 元のパケットIDを維持
 		PacketData: packet.PacketData,    // パケットデータは変更なし
 	}
+
+	log.Printf("[DEBUG] Modified packet: originalTargetKey=%s → newTargetKey=%s",
+		packet.TargetKey.String(), connection.PublicKey.String())
 
 	// 変更したパケットをエンコード
 	packetPayload, err := protocol.EncodePacket(modifiedPacket)
@@ -690,6 +698,9 @@ func (s *Server) handlePacket(connection *Connection, payload []byte) error {
 	s.stats.PacketsForwarded++
 	s.stats.BytesForwarded += uint64(len(packet.PacketData))
 	s.statsMu.Unlock()
+
+	log.Printf("[DEBUG] Packet forwarded: from %s to %s, size=%d bytes",
+		connection.PublicKey.String(), packet.TargetKey.String(), len(packet.PacketData))
 
 	return nil
 }
