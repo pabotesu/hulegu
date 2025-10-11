@@ -231,10 +231,6 @@ func (c *Client) sendPing() error {
 
 	// メッセージのエンコード
 	msgBytes, err := protocol.EncodeMessage(msg)
-	if err != nil {
-		return fmt.Errorf("failed to encode message: %w", err)
-	}
-
 	// WebSocketでの送信
 	err = c.conn.WriteMessage(websocket.BinaryMessage, msgBytes)
 	if err != nil {
@@ -308,24 +304,23 @@ func (c *Client) handleWebSocketMessage(data []byte) {
 
 // handleWebSocketPacket はWebSocketから受信したパケットをWireGuardに転送します
 func (c *Client) handleWebSocketPacket(packetData []byte, sourceKey wgtypes.Key) {
-	// WireGuardパケットの簡易解析（デバッグ用）
-	var srcIP, dstIP string
+	// IPヘッダー解析（デバッグ用）
 	if len(packetData) >= 20 { // 最小IPヘッダーサイズ
 		version := packetData[0] >> 4
 		if version == 4 { // IPv4
-			srcIP = net.IP(packetData[12:16]).String()
-			dstIP = net.IP(packetData[16:20]).String()
-			log.Printf("Received IPv4 packet: src=%s, dst=%s from peer %s",
+			srcIP := net.IP(packetData[12:16]).String()
+			dstIP := net.IP(packetData[16:20]).String()
+			log.Printf("IPv4 packet: src=%s, dst=%s from peer %s",
 				srcIP, dstIP, sourceKey.String())
 		}
 	}
 
-	// 非ブロッキングでキューに投入
+	// WebSocketからのパケットを直接WireGuardに転送
+	// パケットキューを使用
 	select {
 	case c.packetQueue <- wireguardPacket{data: packetData, sourceKey: sourceKey}:
-		// キューに入れることができた
+		log.Printf("Queued packet from peer %s for forwarding to WireGuard", sourceKey.String())
 	default:
-		// キューがいっぱいの場合
 		log.Printf("WARNING: Packet queue full, dropping packet from %s", sourceKey)
 	}
 }
