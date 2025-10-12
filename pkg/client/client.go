@@ -120,6 +120,39 @@ func New(config *Config) (*Client, error) {
 	return client, nil
 }
 
+// initWireGuardConnection はWireGuardへの接続を初期化します
+func (c *Client) initWireGuardConnection() error {
+	// WireGuardリッスンポートを取得
+	port := c.wg.GetListenPort()
+	if port == 0 {
+		return fmt.Errorf("WireGuard not listening on any port")
+	}
+
+	// WireGuardエンドポイントアドレスを解決
+	addr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		return fmt.Errorf("failed to resolve WireGuard address: %w", err)
+	}
+
+	c.wgConnMu.Lock()
+	defer c.wgConnMu.Unlock()
+
+	// 既存の接続があれば閉じる
+	if c.wgConn != nil {
+		c.wgConn.Close()
+	}
+
+	// 新しい接続を確立
+	conn, err := net.DialUDP("udp", nil, addr)
+	if err != nil {
+		return fmt.Errorf("failed to connect to WireGuard: %w", err)
+	}
+
+	c.wgConn = conn
+	log.Printf("Initialized WireGuard connection to %s", addr.String())
+	return nil
+}
+
 // Connect はサーバーとの接続を確立します
 func (c *Client) Connect() error {
 	c.connMu.Lock()
@@ -782,6 +815,15 @@ func (c *Client) setupEndpointForPeer(peerKey wgtypes.Key) error {
 	localAddr := endpoint.LocalAddr().(*net.UDPAddr)
 	log.Printf("Hulegu endpoint for peer %s listening on %s", peerKey, localAddr.String())
 
+	// ここで対象ピアのエンドポイントを更新 - この行を追加
+	err = c.wg.UpdatePeerEndpoint(peerKey, localAddr)
+	if err != nil {
+		// エンドポイントをクローズして戻す
+		endpoint.Close()
+		delete(c.endpoints, peerKey)
+		return fmt.Errorf("failed to update WireGuard peer endpoint: %w", err)
+	}
+
 	log.Printf("Created Hulegu endpoint for peer %s", peerKey)
 	return nil
 }
@@ -792,7 +834,52 @@ func (c *Client) StartPacketForwarding() {
 	go c.packetForwardingLoop()
 }
 
-// 対象ピアが有効化されているか確認する関数を追加
+// processPackets はキューからパケットを取り出して処理します
+func (c *Client) processPackets() {
+	for {
+		select {
+		case <-c.ctx.Done():
+			return
+		case packet := <-c.packetQueue:
+			c.forwardPacketToWireGuard(packet.data)
+		}
+	}
+}
+
+// forwardPacketToWireGuard はパケットをWireGuardに直接転送します
+func (c *Client) forwardPacketToWireGuard(packetData []byte) {
+	// WireGuardリッスンポートを取得
+	port := c.wg.GetListenPort()
+	if port == 0 {
+		log.Printf("ERROR: WireGuard not listening on any port")
+		return
+	}
+
+	// WireGuardエンドポイントアドレス
+	addr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		log.Printf("ERROR: Failed to resolve WireGuard address: %v", err)
+		return
+	}
+
+	// UDP接続を確立
+	conn, err := net.DialUDP("udp", nil, addr)
+	if err != nil {
+		log.Printf("ERROR: Failed to connect to WireGuard: %v", err)
+		return
+	}
+	defer conn.Close()
+
+	// パケット転送
+	n, err := conn.Write(packetData)
+	if err != nil {
+		log.Printf("ERROR: Failed to forward packet to WireGuard: %v", err)
+	} else {
+		log.Printf("Successfully forwarded %d bytes directly to WireGuard", n)
+	}
+}
+
+// IsPeerEnabled はピアが有効かどうかを返します
 func (c *Client) IsPeerEnabled(peerKeyStr string) (bool, error) {
 	peerKey, err := wgtypes.ParseKey(peerKeyStr)
 	if err != nil {
@@ -802,84 +889,6 @@ func (c *Client) IsPeerEnabled(peerKeyStr string) (bool, error) {
 	c.peerMu.RLock()
 	defer c.peerMu.RUnlock()
 
-	// ピアが有効化されているか確認
 	enabled, exists := c.enabledPeers[peerKey]
 	return exists && enabled, nil
-}
-
-// WireGuardソケット初期化関数
-func (c *Client) initWireGuardConnection() error {
-	port := c.wg.GetListenPort()
-	if port == 0 {
-		return fmt.Errorf("WireGuard not listening on any port")
-	}
-
-	wgAddr := fmt.Sprintf("127.0.0.1:%d", port)
-
-	c.wgConnMu.Lock()
-	defer c.wgConnMu.Unlock()
-
-	// 既存のコネクションがあればクローズ
-	if c.wgConn != nil {
-		c.wgConn.Close()
-	}
-
-	// 新しいUDPソケットを作成
-	conn, err := net.Dial("udp", wgAddr)
-	if err != nil {
-		return fmt.Errorf("failed to connect to WireGuard: %w", err)
-	}
-
-	c.wgConn = conn
-	log.Printf("Initialized WireGuard connection to %s", wgAddr)
-	return nil
-}
-
-// パケット処理ワーカー
-func (c *Client) processPackets() {
-	for {
-		select {
-		case <-c.ctx.Done():
-			return
-		case packet := <-c.packetQueue:
-			// 実際のWireGuard転送処理
-			c.forwardPacketToWireGuard(packet.data)
-		}
-	}
-}
-
-// 転送処理の実装
-func (c *Client) forwardPacketToWireGuard(packetData []byte) {
-	// WireGuardのリッスンポートを取得
-	port := c.wg.GetListenPort()
-	if port == 0 {
-		log.Printf("ERROR: WireGuard not listening on any port")
-		return
-	}
-
-	// WireGuardのリッスンアドレス
-	wgAddr := fmt.Sprintf("127.0.0.1:%d", port)
-
-	// UDPアドレスの解決
-	addr, err := net.ResolveUDPAddr("udp", wgAddr)
-	if err != nil {
-		log.Printf("ERROR: Failed to resolve WireGuard address: %v", err)
-		return
-	}
-
-	// UDPコネクション作成
-	conn, err := net.DialUDP("udp", nil, addr)
-	if err != nil {
-		log.Printf("ERROR: Failed to connect to WireGuard: %v", err)
-		return
-	}
-	defer conn.Close()
-
-	// パケットを転送
-	n, err := conn.Write(packetData)
-	if err != nil {
-		log.Printf("ERROR: Failed to forward packet to WireGuard: %v", err)
-	} else {
-		log.Printf("Successfully forwarded %d bytes to WireGuard at %s", n, wgAddr)
-	}
 }
