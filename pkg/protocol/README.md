@@ -105,22 +105,39 @@ case TypePacket:
 タイプとペイロードを含む基本メッセージ構造。
 
 ### HandshakeData
-- クライアント認証情報を含みます：
-- 公開鍵（WireGuard公開鍵）
-- プロトコルバージョン
-- リプレイ攻撃防止のためのタイムスタンプ
+クライアント認証情報を含みます：
+PublicKey - WireGuard公開鍵（32バイト）
+Version - プロトコルバージョン（uint16）
+Timestamp - リプレイ攻撃防止のためのタイムスタンプ（int64）
+
+### HandshakeAckData
+サーバーからのハンドシェイク応答を含みます：
+- SessionID - セッション識別子（文字列）
+- ServerTime - サーバーの現在時刻（int64）
+- Expiry - セッション有効期限（int64、ナノ秒）
 
 ### PacketData
 WireGuardパケット情報を含みます：
+- TargetKey - 宛先ピアの公開鍵（32バイト）
+- SourceKey - 送信元ピアの公開鍵（32バイト）
+- PacketID - パケット識別子（uint32）
+- PacketData - 暗号化済みWireGuardパケットデータ（バイト配列）
 
-- 宛先ピアの公開鍵
-- パケット識別子
-- 生のWireGuardパケットデータ
-- その他の型
-- HandshakeAckData
-- PingData
-- PongData
-- ErrorData
+### PingData
+キープアライブpingリクエスト：
+- Timestamp - 送信時のタイムスタンプ（int64）
+- Sequence - シーケンス番号（uint32）
+
+### PongData
+pingへの応答：
+- EchoedTimestamp - 受信したタイムスタンプ（int64）
+- EchoedSequence - 受信したシーケンス番号（uint32）
+- ServerTime - サーバーの応答時刻（int64）
+
+### ErrorData
+エラー情報：
+- Code - エラーコード（uint16）
+- Message - エラーメッセージ（文字列）
 
 ### エラー処理
 プロトコルには特定のエラーコードによるエラー報告機能が含まれています：
@@ -129,10 +146,21 @@ WireGuardパケット情報を含みます：
 - セッション期限切れ
 - レート制限
 - ピアが見つからない
+- サーバー過負荷
 - バージョンの非互換性
+```
+	ErrorUnknown          uint16 = 0x0000 // 不明なエラー
+	ErrorInvalidMessage   uint16 = 0x0001 // 無効なメッセージ形式
+	ErrorAuthFailure      uint16 = 0x0002 // 認証失敗
+	ErrorSessionExpired   uint16 = 0x0003 // セッション期限切れ
+	ErrorRateLimited      uint16 = 0x0004 // レート制限超過
+	ErrorPeerNotFound     uint16 = 0x0005 // 指定されたピアが見つからない
+	ErrorServerOverloaded uint16 = 0x0006 // サーバー過負荷
+	ErrorProtocolVersion  uint16 = 0x0007 // 互換性のないプロトコルバージョン
+```
 
 ### セキュリティ考慮事項
-- すべてのメッセージは安全なWebSocket接続（wss://）で送信されるべき
+- すべてのメッセージはWebSocket接続（ws://）で送信されるべき (TLSは早急に対応する)
 - タイムスタンプ検証によりリプレイ攻撃を防止
 - クライアント識別はWireGuardの公開鍵を使用するが、接続自体のセキュリティはWSS（WebSocket Secure）に依存
 - WireGuardパケットはエンドツーエンドで暗号化されたまま
