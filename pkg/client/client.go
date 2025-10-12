@@ -609,6 +609,22 @@ func (c *Client) DisablePeer(peerKeyStr string) error {
 	return nil
 }
 
+// GetEnabledPeers は現在有効化されているピアのリストを返します
+func (c *Client) GetEnabledPeers() []string {
+	c.peerMu.RLock()
+	defer c.peerMu.RUnlock()
+
+	// 有効なピアの公開鍵をリストとして返す
+	enabledPeers := make([]string, 0, len(c.enabledPeers))
+	for peerKey, enabled := range c.enabledPeers {
+		if enabled {
+			enabledPeers = append(enabledPeers, peerKey.String())
+		}
+	}
+
+	return enabledPeers
+}
+
 // setupEndpointForPeer は特定のピア用のエンドポイントを設定します
 func (c *Client) setupEndpointForPeer(peerKey wgtypes.Key) error {
 	// WireGuardインターフェースの情報を取得
