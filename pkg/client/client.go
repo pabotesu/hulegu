@@ -437,8 +437,71 @@ func (c *Client) Close() error {
 	return nil
 }
 
-// packetForwardingLoop はエンドポイントからのパケットを処理します
+// forwardPacketToServer はパケットをサーバーに転送します（非同期版）
+func (c *Client) forwardPacketToServer(packetData []byte, peerKey wgtypes.Key) error {
+	// 接続状態の確認のみロック - これは短時間で済む
+	c.connMu.RLock()
+	connected := c.connected
+	conn := c.conn
+	c.connMu.RUnlock()
+
+	if !connected || conn == nil {
+		return ErrNotConnected
+	}
+
+	// パケットIDの生成 - これは排他的に行う必要あり
+	var packetID uint32
+	func() {
+		c.connMu.Lock()
+		defer c.connMu.Unlock()
+		c.packetID++
+		packetID = c.packetID
+	}()
+
+	log.Printf("Forwarding packet to server for peer %s, packetID=%d, size=%d bytes",
+		peerKey.String(), packetID, len(packetData))
+
+	// パケットデータの作成
+	packet := &protocol.PacketData{
+		TargetKey:  peerKey,
+		SourceKey:  c.publicKey,
+		PacketID:   packetID,
+		PacketData: packetData,
+	}
+
+	// パケットデータのエンコード
+	packetPayload, err := protocol.EncodePacket(packet)
+	if err != nil {
+		return fmt.Errorf("failed to encode packet: %w", err)
+	}
+
+	// メッセージの作成
+	msg := &protocol.Message{
+		Type:    protocol.TypePacket,
+		Payload: packetPayload,
+	}
+
+	// メッセージのエンコード
+	msgBytes, err := protocol.EncodeMessage(msg)
+	if err != nil {
+		return fmt.Errorf("failed to encode message: %w", err)
+	}
+
+	// WebSocketでの送信 - gorilla/websocket は内部でスレッドセーフ
+	err = conn.WriteMessage(websocket.BinaryMessage, msgBytes)
+	if err != nil {
+		return fmt.Errorf("failed to send packet: %w", err)
+	}
+
+	return nil
+}
+
+// packetForwardingLoop はエンドポイントからのパケットを処理します（並行処理版）
 func (c *Client) packetForwardingLoop() {
+	// 各ピアのパケット処理を並行して行うためのワーカー数
+	const maxWorkers = 10
+	workerSem := make(chan struct{}, maxWorkers)
+
 	for {
 		select {
 		case <-c.ctx.Done():
@@ -463,76 +526,43 @@ func (c *Client) packetForwardingLoop() {
 			}
 			c.peerMu.RUnlock()
 
-			// 各エンドポイントからのパケットを処理
+			// 各エンドポイントのパケット処理を並行して開始
 			for peerKey, endpoint := range endpointsCopy {
-				packet, err := endpoint.ReadPacket()
-				if err != nil {
-					if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-						continue
-					}
-					continue
-				}
+				select {
+				case workerSem <- struct{}{}: // ワーカースロットの取得
+					// 空きスロットがある場合、非同期でパケット処理を実行
+					go func(key wgtypes.Key, ep *HuleguEndpoint) {
+						defer func() { <-workerSem }() // 処理完了時にスロットを解放
 
-				// パケットをサーバーに転送
-				if endpoint.IsFromWireGuard(packet) {
-					// パケット転送
-					c.forwardPacketToServer(packet.Data, peerKey)
+						// ReadPacketはノンブロッキング（チャンネル経由で受信するため）
+						// すでにreadLoopで受信したパケットのみを処理
+						select {
+						case packet, ok := <-ep.recvPackets:
+							if !ok {
+								// チャンネルが閉じられている場合
+								return
+							}
+
+							// パケットがWireGuardからのものなら転送
+							if ep.IsFromWireGuard(packet) {
+								err := c.forwardPacketToServer(packet.Data, key)
+								if err != nil {
+									log.Printf("Failed to forward packet for peer %s: %v", key.String(), err)
+								}
+							}
+						default:
+							// パケットがない場合は即時リターン（次の処理へ）
+						}
+					}(peerKey, endpoint)
+				default:
+					// ワーカースロットが一杯の場合はスキップ（次の機会に処理）
 				}
 			}
 
-			time.Sleep(5 * time.Millisecond)
+			// 短い間隔で次のループを実行
+			time.Sleep(1 * time.Millisecond)
 		}
 	}
-}
-
-// forwardPacketToServer はパケットをサーバーに転送します
-func (c *Client) forwardPacketToServer(packetData []byte, peerKey wgtypes.Key) error {
-	c.connMu.RLock()
-	defer c.connMu.RUnlock()
-
-	if !c.connected || c.conn == nil {
-		return ErrNotConnected
-	}
-
-	// パケットIDの生成
-	c.packetID++
-
-	log.Printf("Forwarding packet to server for peer %s, packetID=%d, size=%d bytes",
-		peerKey.String(), c.packetID, len(packetData))
-
-	// パケットデータの作成
-	packet := &protocol.PacketData{
-		TargetKey:  peerKey,
-		SourceKey:  c.publicKey,
-		PacketID:   c.packetID,
-		PacketData: packetData,
-	}
-
-	// パケットデータのエンコード
-	packetPayload, err := protocol.EncodePacket(packet)
-	if err != nil {
-		return fmt.Errorf("failed to encode packet: %w", err)
-	}
-
-	// メッセージの作成
-	msg := &protocol.Message{
-		Type:    protocol.TypePacket,
-		Payload: packetPayload,
-	}
-
-	// メッセージのエンコード
-	msgBytes, err := protocol.EncodeMessage(msg)
-	if err != nil {
-		return fmt.Errorf("failed to encode message: %w", err)
-	}
-
-	// WebSocketでの送信
-	err = c.conn.WriteMessage(websocket.BinaryMessage, msgBytes)
-	if err != nil {
-		return fmt.Errorf("failed to send packet: %w", err)
-	}
-
-	return nil
 }
 
 // EnablePeer はピアをHuleguで有効化します
